@@ -1,21 +1,26 @@
+# main.py
 import os
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 import vertexai
 from vertexai.generative_models import GenerativeModel
-import uvicorn
 
 PROJECT_ID = os.environ["PROJECT_ID"]
-LOCATION = os.environ.get("VERTEX_LOCATION", "global")  # "global" recommended for Gemini 2.x
-API_KEY = os.environ.get("PROXY_KEY")  # optional shared secret
-
-app = FastAPI()
-
-vertexai.init(project=PROJECT_ID, location=LOCATION)
-model = GenerativeModel("gemini-2.5-flash")
+LOCATION = os.environ.get("VERTEX_LOCATION", "global")
+API_KEY = os.environ.get("PROXY_KEY")
 
 class ChatIn(BaseModel):
     text: str
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # init AFTER server boots, before first request
+    vertexai.init(project=PROJECT_ID, location=LOCATION)
+    app.state.model = GenerativeModel("gemini-2.5-flash")
+    yield  # no teardown
+
+app = FastAPI(lifespan=lifespan)
 
 @app.get("/healthz")
 def healthz():
@@ -26,11 +31,8 @@ def chat(payload: ChatIn, x_api_key: str | None = Header(default=None)):
     if API_KEY and x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="invalid api key")
     try:
-        resp = model.generate_content(payload.text)
+        resp = app.state.model.generate_content(payload.text)
         return {"text": resp.text}
     except Exception as e:
-        # surface a clear message to the caller
-        raise HTTPException(status_code=502, detail=f"vertex_error: {e.__class__.__name__}: {e}") from e
+        raise HTTPException(status_code=502, detail=f"vertex_error: {e.__class__.__name__}: {e}")
 
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))
